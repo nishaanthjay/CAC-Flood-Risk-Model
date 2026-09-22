@@ -1,6 +1,33 @@
 import math #imports math
 
 import requests #imports requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+session = requests.Session()
+retry = Retry(total=4, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+session.mount("https://", HTTPAdapter(max_retries=retry))
+
+FEMA_URL = "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
+
+
+def queryZones(xmin, ymin, xmax, ymax):
+    params = {
+        "geometry": f'{{"xmin":{xmin},"ymin":{ymin},"xmax":{xmax},"ymax":{ymax}}}',
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": 4326,
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "FLD_ZONE,ZONE_SUBTY,SFHA_TF,STATIC_BFE,DEPTH,VELOCITY",
+        "returnGeometry": "false",
+        "f": "json",
+    }
+    try:
+        response = session.get(FEMA_URL, params=params, timeout=20)
+        response.raise_for_status()
+        return [feature["attributes"] for feature in response.json().get("features", [])]
+    except requests.exceptions.RequestException as error:
+        print(f"FEMA flood zone service unavailable: {error}")
+        exit()
 
 address = input("Enter your address: ") #inputs address from user
 url = "https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress" #Census geocoding API endpoint
@@ -12,7 +39,7 @@ params = {
     "format": "json"
 }
 
-response = requests.get(url, params=params)
+response = session.get(url, params=params, timeout=20)
 if response.status_code == 200:
     data = response.json()
     if data['result']['addressMatches']:
@@ -59,25 +86,7 @@ while True:
     ymin = y - degOffsetLat #calculate the minimum latitude for the bounding box
     ymax = y + degOffsetLat #calculate the maximum latitude for the bounding box
 
-    floodUrl = ("https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
-        "?where=&text=&objectIds=&time=&timeRelation=esriTimeRelationOverlaps"
-        f"&geometry=%7B%22xmin%22%3A{xmin}%2C%22ymin%22%3A{ymin}%2C%22xmax%22%3A{xmax}%2C%22ymax%22%3A{ymax}%7D"
-        "&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects"
-        "&distance=&units=esriSRUnit_Foot"
-        "&relationParam=&outFields=FLD_ZONE%2C+ZONE_SUBTY%2C+SFHA_TF%2C+STATIC_BFE%2CDEPTH%2CVELOCITY"
-        "&returnGeometry=false&returnTrueCurves=false&maxAllowableOffset=&geometryPrecision="
-        "&outSR=&havingClause=&returnIdsOnly=false&returnCountOnly=false&orderByFields="
-        "&groupByFieldsForStatistics=&outStatistics=&returnZ=false&returnM=false&gdbVersion="
-        "&historicMoment=&returnDistinctValues=false&resultOffset=&resultRecordCount="
-        "&returnExtentOnly=false&sqlFormat=none&datumTransformation=&parameterValues="
-        "&rangeValues=&quantizationParameters=&featureEncoding=esriDefault&f=pjson") #constructs the URL for the FEMA flood zone query, including the bounding box coordinates and other parameters
-
-    responseFlood = requests.get(floodUrl)
-    if responseFlood.status_code == 200: #if the request is successful, parse the JSON response and extract the flood zone information
-        floodData = responseFlood.json()
-        zonesFound = [f['attributes'] for f in floodData.get('features', [])]
-    else:
-        zonesFound = []
+    zonesFound = queryZones(xmin, ymin, xmax, ymax)
 
     uniqueZones = set(z.get('FLD_ZONE', 'Unknown') for z in zonesFound) #extracts the unique flood zones found in the response
     if len(uniqueZones) > 1: #if more than one unique flood zone is found, set the highFeet variable to the current bufferFeet and break the loop
@@ -105,24 +114,7 @@ if highFeet is not None:
         ymin = y - degOffsetLat
         ymax = y + degOffsetLat
 
-        floodUrl = ("https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
-            "?where=&text=&objectIds=&time=&timeRelation=esriTimeRelationOverlaps"
-            f"&geometry=%7B%22xmin%22%3A{xmin}%2C%22ymin%22%3A{ymin}%2C%22xmax%22%3A{xmax}%2C%22ymax%22%3A{ymax}%7D"
-            "&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects"
-            "&distance=&units=esriSRUnit_Foot"
-            "&relationParam=&outFields=FLD_ZONE%2C+ZONE_SUBTY%2C+SFHA_TF%2C+STATIC_BFE%2CDEPTH%2CVELOCITY"
-            "&returnGeometry=false&returnTrueCurves=false&maxAllowableOffset=&geometryPrecision="
-            "&outSR=&havingClause=&returnIdsOnly=false&returnCountOnly=false&orderByFields="
-            "&groupByFieldsForStatistics=&outStatistics=&returnZ=false&returnM=false&gdbVersion="
-            "&historicMoment=&returnDistinctValues=false&resultOffset=&resultRecordCount="
-            "&returnExtentOnly=false&sqlFormat=none&datumTransformation=&parameterValues="
-            "&rangeValues=&quantizationParameters=&featureEncoding=esriDefault&f=pjson") #constructs the URL for the FEMA flood zone query, including the bounding box coordinates and other parameters
-
-        responseFlood = requests.get(floodUrl)
-        if responseFlood.status_code == 200:
-            zonesAtMid = [f['attributes'] for f in responseFlood.json().get('features', [])] #if the request is successful, parse the JSON response and extract the flood zone information
-        else:
-            zonesAtMid = []
+        zonesAtMid = queryZones(xmin, ymin, xmax, ymax)
 
         uniqueZones = set(z.get('FLD_ZONE', 'Unknown') for z in zonesAtMid)
         if len(uniqueZones) > 1:
@@ -157,7 +149,7 @@ claimsParams = { #constructs the parameters for the FEMA NFIP claims query
     "$count": "true", #requests the total count of claims matching the filter criteria
     "$format": "json"
 }
-responseClaims = requests.get(claimsUrl, params=claimsParams)
+responseClaims = session.get(claimsUrl, params=claimsParams, timeout=20)
 if responseClaims.status_code == 200: #if the request is successful, parse the JSON response and extract the claims information
     claimsData = responseClaims.json()
     claims = claimsData.get("NfipClaims", [])
